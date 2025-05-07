@@ -26,7 +26,7 @@ def main():
     # Initialize the cross-layer transcoder
     transcoder = OpenCrossLayerTranscoder(
         model_name="gpt2",  # GPT-2 Small
-        num_features=10000,   # Number of interpretable features
+        num_features=24576,   # Number of interpretable features
         device=device
     )
     
@@ -312,7 +312,7 @@ def main():
     for i, text in enumerate(test_texts):
         fig = transcoder.create_attribution_graph(
             text=text,
-            threshold=0.1,
+            threshold=0.9,
             save_path=f'visualizations/attribution_graph_{i+1}.png'
         )
         plt.close(fig)
