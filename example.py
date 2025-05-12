@@ -26,7 +26,7 @@ def main():
     # Initialize the cross-layer transcoder
     transcoder = OpenCrossLayerTranscoder(
         model_name="gpt2",  # GPT-2 Small
-        num_features=24576,   # Number of interpretable features
+        num_features=4000,   # Number of interpretable features
         device=device
     )
     
@@ -272,7 +272,7 @@ def main():
     metrics = transcoder.train_transcoder(
         texts=train_texts,
         batch_size=2,
-        num_epochs=3,
+        num_epochs=20,
         learning_rate=1e-4
     )
     

@@ -19,6 +19,7 @@ from tqdm import tqdm
 from sklearn.decomposition import PCA
 from typing import List, Dict, Tuple, Optional, Union
 
+DEBUG = True
 
 class OpenCrossLayerTranscoder(nn.Module):
     """
@@ -78,6 +79,18 @@ class OpenCrossLayerTranscoder(nn.Module):
         # Feature importance tracking
         self.feature_importance = torch.zeros(self.num_layers, num_features).to(device)
         
+    def print_activations(self, layer_idx, features_relu, num_features):
+        if features_relu.numel() > 0: # Check if tensor is not empty
+            print(f"\n--- Debug Sample: Layer {layer_idx} Feature Activations (features_relu) ---")
+            print(f"Shape of features_relu: {features_relu.shape} (Batch, SeqLen, NumFeatures)")
+            
+            # Print all feature activations for the first token of the first item in the batch
+            if features_relu.shape[0] > 0 and features_relu.shape[1] > 0:
+                print(f"Activations for B[0], T[0] (all {num_features} features):")
+                print(features_relu[0, 0, :])
+            
+            print(f"--- End Debug Sample ---")
+
     def _register_hooks(self):
         """Register forward hooks to capture MLP activations from each layer."""
         def hook_fn(layer_idx):
@@ -183,7 +196,8 @@ class OpenCrossLayerTranscoder(nn.Module):
         metrics = {
             'total_loss': [],
             'reconstruction_loss': [],
-            'sparsity_loss': []
+            'sparsity_loss': [],
+            'l0_metric': []
         }
         
         # Tokenize all texts
@@ -194,6 +208,7 @@ class OpenCrossLayerTranscoder(nn.Module):
             epoch_total_loss = 0
             epoch_recon_loss = 0
             epoch_sparsity_loss = 0
+            epoch_l0_metric = 0
             
             # Process in batches
             num_batches = (len(encoded_texts) + batch_size - 1) // batch_size
@@ -246,12 +261,19 @@ class OpenCrossLayerTranscoder(nn.Module):
                         # Decode back to MLP space
                         reconstructed = self.decoders[layer_idx](features_relu)
                         
+                        if DEBUG == True and batch_idx == 0 and epoch == 0: 
+                            self.print_activations(layer_idx, features_relu, self.num_features)
+
+                        # L0 metric (sparsity)
+                        # l0_metric = torch.count_nonzero(features_relu, dim=2).float()
+                        l0_metric = torch.sum((features_relu > 0.1).float(), dim=2)
+
                         # Reconstruction loss (MSE)
                         recon_loss = F.mse_loss(reconstructed, mlp_acts)
                         reconstruction_loss += recon_loss
                         
                         # Sparsity loss (L1 regularization on features)
-                        l1_loss = 0.1 * torch.mean(torch.abs(features))
+                        l1_loss = 1000 * torch.mean(torch.abs(features))
                         sparsity_loss += l1_loss
                         
                         # Add to total loss
@@ -265,20 +287,25 @@ class OpenCrossLayerTranscoder(nn.Module):
                 epoch_total_loss += total_loss.item()
                 epoch_recon_loss += reconstruction_loss.item()
                 epoch_sparsity_loss += sparsity_loss.item()
+
+                epoch_l0_metric += torch.mean(l0_metric).item()
             
             # Record epoch metrics
             avg_total_loss = epoch_total_loss / num_batches
             avg_recon_loss = epoch_recon_loss / num_batches
             avg_sparsity_loss = epoch_sparsity_loss / num_batches
+            avg_l0_metric = epoch_l0_metric / num_batches
             
             metrics['total_loss'].append(avg_total_loss)
             metrics['reconstruction_loss'].append(avg_recon_loss)
             metrics['sparsity_loss'].append(avg_sparsity_loss)
+            metrics['l0_metric'].append(avg_l0_metric)
             
             print(f"Epoch {epoch+1}/{num_epochs}: "
                   f"Loss = {avg_total_loss:.4f}, "
                   f"Recon = {avg_recon_loss:.4f}, "
-                  f"Sparsity = {avg_sparsity_loss:.4f}")
+                  f"Sparsity = {avg_sparsity_loss:.4f}, "
+                  f"L0 Metric = {avg_l0_metric:.4f}")
         
         return metrics
     
