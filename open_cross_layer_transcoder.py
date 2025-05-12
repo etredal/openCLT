@@ -674,7 +674,9 @@ class ReplacementModel(nn.Module):
             max_length=max_length,
             do_sample=True,
             top_p=0.9,
-            temperature=0.7
+            temperature=0.7,
+            attention_mask=None,
+            pad_token_id=self.tokenizer.eos_token_id
         )
         
         # Decode
