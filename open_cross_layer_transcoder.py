@@ -74,6 +74,7 @@ class OpenCrossLayerTranscoder(nn.Module):
         # Initialize the hooks and activation storage
         self.hooks = []
         self.mlp_activations = {}
+        self.mlp_inputs_captured = {}
         self._register_hooks()
         
         # Feature importance tracking
@@ -94,9 +95,10 @@ class OpenCrossLayerTranscoder(nn.Module):
     def _register_hooks(self):
         """Register forward hooks to capture MLP activations from each layer."""
         def hook_fn(layer_idx):
-            def hook(module, input, output):
-                self.mlp_activations[layer_idx] = output
-                return output
+            def hook(module, input_args, output_tensor):
+                self.mlp_inputs_captured[layer_idx] = input_args[0]
+                self.mlp_activations[layer_idx] = output_tensor
+                return output_tensor
             return hook
         
         # Remove any existing hooks
@@ -130,7 +132,8 @@ class OpenCrossLayerTranscoder(nn.Module):
                 - 'reconstructed_activations': Reconstructed MLP activations
         """
         # Clear previous activations
-        self.mlp_activations = {}
+        self.mlp_inputs_captured.clear()
+        self.mlp_activations.clear()
         
         # Forward pass through base model to collect MLP activations via hooks
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
@@ -140,12 +143,10 @@ class OpenCrossLayerTranscoder(nn.Module):
         reconstructed_activations = {}
         
         for layer_idx in range(self.num_layers):
-            if layer_idx in self.mlp_activations:
-                # Get MLP activations for this layer
-                mlp_acts = self.mlp_activations[layer_idx]
-                
-                # Encode to features
-                features = self.encoders[layer_idx](mlp_acts)
+            if layer_idx in self.mlp_inputs_captured:
+                encoder_input_data = self.mlp_inputs_captured[layer_idx]
+                features = self.encoders[layer_idx](encoder_input_data)
+
                 feature_activations[layer_idx] = features
                 
                 # Apply ReLU to features for interpretability
@@ -238,6 +239,9 @@ class OpenCrossLayerTranscoder(nn.Module):
                 
                 # Clear gradients
                 optimizer.zero_grad()
+
+                self.mlp_inputs_captured.clear()
+                self.mlp_activations.clear()
                 
                 # Forward pass to collect MLP activations
                 self.base_model(input_ids=input_ids, attention_mask=attention_mask)
@@ -248,18 +252,21 @@ class OpenCrossLayerTranscoder(nn.Module):
                 sparsity_loss = 0
                 
                 for layer_idx in range(self.num_layers):
-                    if layer_idx in self.mlp_activations:
+                    if layer_idx in self.mlp_activations and layer_idx in self.mlp_inputs_captured:
+                        # Get MLP inputs
+                        residual_stream_input_to_mlp = self.mlp_inputs_captured[layer_idx]
+
                         # Get MLP activations
-                        mlp_acts = self.mlp_activations[layer_idx]
+                        mlp_target_output  = self.mlp_activations[layer_idx]
                         
                         # Encode to features
-                        features = self.encoders[layer_idx](mlp_acts)
+                        features = self.encoders[layer_idx](residual_stream_input_to_mlp)
                         
                         # Apply ReLU for interpretability
                         features_relu = F.relu(features)
                         
                         # Decode back to MLP space
-                        reconstructed = self.decoders[layer_idx](features_relu)
+                        reconstructed_mlp_output = self.decoders[layer_idx](features_relu)
                         
                         if DEBUG == True and batch_idx == 0 and epoch == 0: 
                             self.print_activations(layer_idx, features_relu, self.num_features)
@@ -269,11 +276,11 @@ class OpenCrossLayerTranscoder(nn.Module):
                         l0_metric = torch.sum((features_relu > 0.1).float(), dim=2)
 
                         # Reconstruction loss (MSE)
-                        recon_loss = F.mse_loss(reconstructed, mlp_acts)
+                        recon_loss = F.mse_loss(reconstructed_mlp_output, mlp_target_output)
                         reconstruction_loss += recon_loss
                         
                         # Sparsity loss (L1 regularization on features)
-                        l1_loss = 1000 * torch.mean(torch.abs(features))
+                        l1_loss = 500 * torch.mean(torch.abs(features))
                         sparsity_loss += l1_loss
                         
                         # Add to total loss
@@ -591,28 +598,23 @@ class ReplacementModel(nn.Module):
     def _register_replacement_hooks(self):
         """Register hooks to replace MLP outputs with transcoder reconstructions."""
         def hook_fn(layer_idx):
-            def hook(module, input, output):
+            def hook(module, input_args, output_tensor):
                 # If we have a transcoder and it has processed this layer
-                if (self.transcoder and 
-                    hasattr(self.transcoder, 'mlp_activations') and 
-                    layer_idx in self.transcoder.mlp_activations):
-                    
-                    # Get original MLP activations
-                    orig_acts = self.transcoder.mlp_activations[layer_idx]
-                    
-                    # Encode to features
-                    features = self.transcoder.encoders[layer_idx](orig_acts)
-                    
-                    # Apply ReLU for interpretability
+                if self.transcoder and layer_idx < self.transcoder.num_layers: # Check transcoder and layer index validity
+                    # Get the LIVE input to the current MLP block (r_k for this layer in ReplacementModel)
+                    current_mlp_input_rk = input_args[0] 
+
+                    # Encode using the transcoder's encoder, which is now trained to expect r_k
+                    features = self.transcoder.encoders[layer_idx](current_mlp_input_rk)
                     features_relu = F.relu(features)
-                    
-                    # Decode back to MLP space
-                    reconstructed = self.transcoder.decoders[layer_idx](features_relu)
-                    
-                    # Replace the output
-                    return reconstructed
+
+                    # Decode back to MLP output space. The decoder was trained to produce MLP_k(r_k).
+                    reconstructed_mlp_equivalent_output = self.transcoder.decoders[layer_idx](features_relu)
+
+                    # Replace the original MLP output with the transcoder's reconstructed output
+                    return reconstructed_mlp_equivalent_output
                 else:
-                    return output
+                    return output_tensor
             return hook
         
         # Remove any existing hooks

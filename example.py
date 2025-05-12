@@ -272,7 +272,7 @@ def main():
     metrics = transcoder.train_transcoder(
         texts=train_texts,
         batch_size=2,
-        num_epochs=20,
+        num_epochs=5,
         learning_rate=1e-4
     )
     
