@@ -683,3 +683,10 @@ class ReplacementModel(nn.Module):
         output_text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
         
         return output_text
+    
+    def save_model(self, path: str):
+        """Save the replacement model."""
+        torch.save({
+            'base_model': self.base_model.state_dict(),
+            'replacement_model': self.transcoder.state_dict()
+        }, path)

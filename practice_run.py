@@ -9,24 +9,36 @@ import torch
 import matplotlib.pyplot as plt
 from open_cross_layer_transcoder import OpenCrossLayerTranscoder, ReplacementModel
 import os
+import uuid
 import numpy as np
 from tqdm import tqdm
 
 # Set device
-#device = "cuda" if torch.cuda.is_available() else "cpu"
-device="cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+#device="cpu"
 print(f"Using device: {device}")
 
+# Generate random guid
+run_uuid = uuid.uuid4()
+
 # Create output directory for visualizations
-os.makedirs("visualizations", exist_ok=True)
+run_dir = "run_" + str(run_uuid)
+os.makedirs(run_dir, exist_ok=True)
 
 def main():
+    print("Starting: " + run_dir)
     print("Initializing Cross-Layer Transcoder with GPT-2 Small...")
     
+    # Params
+    model_name = "gpt2"  # GPT-2 Small
+    num_features = 4000  # Number of interpretable features
+    batch_size = 2
+    num_epochs = 2
+
     # Initialize the cross-layer transcoder
     transcoder = OpenCrossLayerTranscoder(
-        model_name="gpt2",  # GPT-2 Small
-        num_features=24000,   # Number of interpretable features
+        model_name=model_name,
+        num_features=num_features,
         device=device
     )
     
@@ -271,8 +283,8 @@ def main():
     print("Training the Cross-Layer Transcoder...")
     metrics = transcoder.train_transcoder(
         texts=train_texts,
-        batch_size=2,
-        num_epochs=5,
+        batch_size=batch_size,
+        num_epochs=num_epochs,
         learning_rate=1e-4
     )
     
@@ -286,9 +298,9 @@ def main():
     plt.title('Training Metrics')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig('visualizations/training_metrics.png')
-    print("Training metrics saved to visualizations/training_metrics.png")
-    
+    plt.savefig(f'{run_dir}/training_metrics.png')
+    print(f"Training metrics saved to {run_dir}/training_metrics.png")
+
     # Test texts for visualization
     test_texts = [
         "The president of the United States lives in the White House.",
@@ -302,26 +314,26 @@ def main():
         fig = transcoder.visualize_feature_activations(
             text=text,
             top_n=5,
-            save_path=f'visualizations/feature_activations_{i+1}.png'
+            save_path=f'{run_dir}/feature_activations_{i+1}.png'
         )
         plt.close(fig)
-        print(f"Feature activations for text {i+1} saved to visualizations/feature_activations_{i+1}.png")
-    
+        print(f"Feature activations for text {i+1} saved to {run_dir}/feature_activations_{i+1}.png")
+
     # Create attribution graphs
     print("Creating attribution graphs...")
     for i, text in enumerate(test_texts):
         fig = transcoder.create_attribution_graph(
             text=text,
-            threshold=0.9,
-            save_path=f'visualizations/attribution_graph_{i+1}.png'
+            threshold=0.8,
+            save_path=f'{run_dir}/attribution_graph_{i+1}.png'
         )
         plt.close(fig)
-        print(f"Attribution graph for text {i+1} saved to visualizations/attribution_graph_{i+1}.png")
+        print(f"Attribution graph for text {i+1} saved to {run_dir}/attribution_graph_{i+1}.png")
     
     # Create a replacement model
     print("Creating replacement model...")
     replacement_model = ReplacementModel(
-        base_model_name="gpt2",
+        base_model_name=model_name,
         transcoder=transcoder
     )
     
@@ -330,9 +342,9 @@ def main():
     
     # Initialize the original model
     from transformers import GPT2LMHeadModel, GPT2Tokenizer
-    original_model = GPT2LMHeadModel.from_pretrained("gpt2").to(device)
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    
+    original_model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+
     # Compare outputs
     comparison_results = []
     
@@ -411,15 +423,46 @@ def main():
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('visualizations/model_comparison.png')
-    print("Model comparison results saved to visualizations/model_comparison.png")
-    
+    plt.savefig(f'{run_dir}/model_comparison.png')
+    print(f"Model comparison results saved to {run_dir}/model_comparison.png")
+
     # Save the trained transcoder
-    transcoder.save_model('cross_layer_transcoder_gpt2.pt')
-    print("Trained cross-layer transcoder saved to cross_layer_transcoder_gpt2.pt")
-    
+    transcoder.save_model(f'{run_dir}/cross_layer_transcoder_gpt2.pt')
+    print(f"Trained cross-layer transcoder saved to {run_dir}/cross_layer_transcoder_gpt2.pt")
+
+    # Save the replacement model
+    replacement_model.save_model(f'{run_dir}/replacement_model_gpt2.pt')
+    print(f"Replacement model saved to {run_dir}/replacement_model_gpt2.pt")
+
+    # Save the training metrics in json format
+    print("Saving training metrics...")
+    save_metrics = {
+        'total_loss': metrics['total_loss'],
+        'reconstruction_loss': metrics['reconstruction_loss'],
+        'sparsity_loss': metrics['sparsity_loss']
+    }
+
+    with open(f'{run_dir}/training_metrics.json', 'w') as f:
+        import json
+        json.dump(save_metrics, f)
+    print(f"Training metrics saved to {run_dir}/training_metrics.json")
+
+    # Save params
+    params = {
+        'model_name': model_name,
+        'num_features': num_features,
+        'device': device,
+        'batch_size': batch_size,
+        'num_epochs': num_epochs
+    }
+    # Save params to a text file
+    with open(f'{run_dir}/params.txt', 'w') as f:
+        for key, value in params.items():
+            f.write(f"{key}: {value}\n")
+    print(f"Parameters saved to {run_dir}/params.txt")
+
     print("\nExample completed successfully!")
-    print("All visualizations are saved in the 'visualizations' directory.")
+    print(f"All visualizations and data are saved in the '{run_dir}' directory.")
 
 if __name__ == "__main__":
     main()

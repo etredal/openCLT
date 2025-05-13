@@ -89,7 +89,7 @@ transcoder.save_model('cross_layer_transcoder_gpt2.pt')
 ### Running the Example Script
 
 ```bash
-python example.py
+python practice_run.py
 ```
 
 This will:
