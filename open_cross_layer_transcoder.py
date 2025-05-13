@@ -64,12 +64,12 @@ class OpenCrossLayerTranscoder(nn.Module):
         self.encoders = nn.ModuleList([
             nn.Linear(self.hidden_size, num_features) 
             for _ in range(self.num_layers)
-        ])
+        ]).to(device)
         
         self.decoders = nn.ModuleList([
             nn.Linear(num_features, self.hidden_size)
             for _ in range(self.num_layers)
-        ])
+        ]).to(device)
         
         # Initialize the hooks and activation storage
         self.hooks = []
