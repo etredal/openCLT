@@ -280,7 +280,7 @@ class OpenCrossLayerTranscoder(nn.Module):
                         reconstruction_loss += recon_loss
                         
                         # Sparsity loss (L1 regularization on features)
-                        l1_loss = 500 * torch.mean(torch.abs(features))
+                        l1_loss = 300 * torch.mean(torch.abs(features))
                         sparsity_loss += l1_loss
                         
                         # Add to total loss
