@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.decomposition import PCA
 from typing import List, Dict, Tuple, Optional, Union
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 DEBUG = True
 
@@ -171,7 +172,11 @@ class OpenCrossLayerTranscoder(nn.Module):
                          texts: List[str], 
                          batch_size: int = 4, 
                          num_epochs: int = 5,
-                         learning_rate: float = 1e-4) -> Dict[str, List[float]]:
+                         learning_rate: float = 1e-4,
+                         l1_sparsity_coefficient: float = 0.01,
+                         lr_scheduler_factor: float = 0.1,
+                         lr_scheduler_patience: int = 100,
+                         ) -> Dict[str, List[float]]:
         """
         Train the cross-layer transcoder on a corpus of texts.
         
@@ -180,6 +185,9 @@ class OpenCrossLayerTranscoder(nn.Module):
             batch_size: Batch size for training
             num_epochs: Number of training epochs
             learning_rate: Learning rate for optimizer
+            l1_sparsity_coefficient: Coefficient for L1 sparsity loss on features
+            lr_scheduler_factor: Factor by which the learning rate will be reduced by scheduler.
+            lr_scheduler_patience: Number of epochs with no improvement after which learning rate will be reduced.
             
         Returns:
             Dictionary of training metrics
@@ -192,13 +200,20 @@ class OpenCrossLayerTranscoder(nn.Module):
             list(self.encoders.parameters()) + list(self.decoders.parameters()),
             lr=learning_rate
         )
-        
+
+        scheduler = ReduceLROnPlateau(optimizer,
+                                      mode='min', # We want the loss to decrease
+                                      factor=lr_scheduler_factor,
+                                      patience=lr_scheduler_patience,
+                                      verbose=True, # Prints a message when LR is reduced
+        )        
         # Training metrics
         metrics = {
             'total_loss': [],
             'reconstruction_loss': [],
             'sparsity_loss': [],
-            'l0_metric': []
+            'l0_metric': [],
+            'learning_rate': []
         }
         
         # Tokenize all texts
@@ -253,11 +268,12 @@ class OpenCrossLayerTranscoder(nn.Module):
                 
                 for layer_idx in range(self.num_layers):
                     if layer_idx in self.mlp_activations and layer_idx in self.mlp_inputs_captured:
-                        # Get MLP inputs
+                        # Get MLP inputs and outputs
                         residual_stream_input_to_mlp = self.mlp_inputs_captured[layer_idx]
+                        mlp_actual_output = self.mlp_activations[layer_idx]
 
-                        # Get MLP activations
-                        mlp_target_output  = self.mlp_activations[layer_idx]
+                        # Calculate MLP's contribution to residual stream
+                        mlp_contribution = mlp_actual_output - residual_stream_input_to_mlp
                         
                         # Encode to features
                         features = self.encoders[layer_idx](residual_stream_input_to_mlp)
@@ -276,11 +292,11 @@ class OpenCrossLayerTranscoder(nn.Module):
                         l0_metric = torch.sum((features_relu > 0.1).float(), dim=2)
 
                         # Reconstruction loss (MSE)
-                        recon_loss = F.mse_loss(reconstructed_mlp_output, mlp_target_output)
+                        recon_loss = F.mse_loss(reconstructed_mlp_output, mlp_contribution)
                         reconstruction_loss += recon_loss
                         
                         # Sparsity loss (L1 regularization on features)
-                        l1_loss = 300 * torch.mean(torch.abs(features))
+                        l1_loss = l1_sparsity_coefficient * torch.mean(torch.abs(features))
                         sparsity_loss += l1_loss
                         
                         # Add to total loss
@@ -307,6 +323,17 @@ class OpenCrossLayerTranscoder(nn.Module):
             metrics['reconstruction_loss'].append(avg_recon_loss)
             metrics['sparsity_loss'].append(avg_sparsity_loss)
             metrics['l0_metric'].append(avg_l0_metric)
+            metrics['learning_rate'].append(optimizer.param_groups[0]['lr'])
+
+            print(f"Epoch {epoch+1}/{num_epochs}: "
+                  f"Loss = {avg_total_loss:.4f}, "
+                  f"Recon = {avg_recon_loss:.4f}, "
+                  f"Sparsity = {avg_sparsity_loss:.4f}, "
+                  f"L0 Metric = {avg_l0_metric:.4f}, "
+                  f"LR = {optimizer.param_groups[0]['lr']:.1e}")
+            
+            # Step the scheduler
+            scheduler.step(avg_total_loss) # Step with the monitored metric
             
             print(f"Epoch {epoch+1}/{num_epochs}: "
                   f"Loss = {avg_total_loss:.4f}, "
@@ -611,8 +638,8 @@ class ReplacementModel(nn.Module):
                     # Decode back to MLP output space. The decoder was trained to produce MLP_k(r_k).
                     reconstructed_mlp_equivalent_output = self.transcoder.decoders[layer_idx](features_relu)
 
-                    # Replace the original MLP output with the transcoder's reconstructed output
-                    return reconstructed_mlp_equivalent_output
+                    # Add the original MLP output with the transcoder's reconstructed output
+                    return current_mlp_input_rk + reconstructed_mlp_equivalent_output
                 else:
                     return output_tensor
             return hook
@@ -645,10 +672,6 @@ class ReplacementModel(nn.Module):
             Model outputs
         """
         # First run through transcoder to collect activations
-        if self.transcoder:
-            self.transcoder(input_ids, attention_mask)
-        
-        # Then run through base model with replacement hooks active
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
         
         return outputs
