@@ -205,7 +205,7 @@ class OpenCrossLayerTranscoder(nn.Module):
                                       mode='min', # We want the loss to decrease
                                       factor=lr_scheduler_factor,
                                       patience=lr_scheduler_patience,
-                                      verbose=True, # Prints a message when LR is reduced
+                                      verbose=True # Prints a message when LR is reduced
         )        
         # Training metrics
         metrics = {

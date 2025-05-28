@@ -34,7 +34,7 @@ def main():
     model_name = "gpt2"  # GPT-2 Small
     num_features = 3072  # Number of interpretable features
     batch_size = 30
-    num_epochs = 100000
+    num_epochs = 50000
 
     # Initialize the cross-layer transcoder
     transcoder = OpenCrossLayerTranscoder(
@@ -43,9 +43,10 @@ def main():
         device=device
     )
     
-    dataset = load_dataset("bookcorpus", split="train[:1%]", trust_remote_code=True)
+    dataset = load_dataset("bookcorpus", split="train[:1%]", trust_remote_code=True, streaming=True)
+    print("Loading dataset...")
     sentences = [entry["text"] for entry in dataset]
-    train_texts = sentences[:30000]
+    train_texts = sentences[:3000]
     print(f"Loaded {len(train_texts)} training texts: {train_texts[:5]}...")
     
     # Train the transcoder
