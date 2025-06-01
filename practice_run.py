@@ -12,7 +12,13 @@ import os
 import uuid
 import numpy as np
 from tqdm import tqdm
+from datasets import Dataset
+from pyarrow import feather
 from datasets import load_dataset
+import gc
+import json
+import time
+
 
 # Set device
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -32,35 +38,50 @@ def main():
     
     # Params
     model_name = "gpt2"  # GPT-2 Small
-    num_features = 3072  # Number of interpretable features
-    batch_size = 30
-    num_epochs = 50000
+    num_features = 16 * 768
+    batch_size = 64
+    num_epochs = 100
+    activation_type = "topk"
+    topk_features = int(num_features * 0.02)  
 
     # Initialize the cross-layer transcoder
     transcoder = OpenCrossLayerTranscoder(
         model_name=model_name,
         num_features=num_features,
-        device=device
+        device=device,
+        activation_type=activation_type,
+        topk_features=topk_features
     )
-    
-    dataset = load_dataset("bookcorpus", split="train[:1%]", trust_remote_code=True, streaming=True)
-    print("Loading dataset...")
+
+    dataset = load_dataset("bookcorpus", split="train[:5%]", trust_remote_code=True)
     sentences = [entry["text"] for entry in dataset]
-    train_texts = sentences[:3000]
-    print(f"Loaded {len(train_texts)} training texts: {train_texts[:5]}...")
+    train_texts = sentences[:800000]
+    print(f"Loaded {len(train_texts)} training texts: {train_texts[:5]}")
+    
+
+    print("Cleaning memory before training...")
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    start_time = time.time()
+    print("Training the Cross-Layer Transcoder...")
     
     # Train the transcoder
-    print("Training the Cross-Layer Transcoder...")
     metrics = transcoder.train_transcoder(
         texts=train_texts,
         batch_size=batch_size,
         num_epochs=num_epochs,
         learning_rate=1e-4,
-        l1_sparsity_coefficient=0.01,
-        lr_scheduler_factor=0.1,      # Reduce LR to 10% of current
-        lr_scheduler_patience=100,      # After 7 epochs of no improvement in total_loss
+        l1_sparsity_coefficient=0.0,
+        lr_scheduler_factor=0.5,      # Reduce LR to 10% of current
+        lr_scheduler_patience=50     # After 7 epochs of no improvement in total_loss
     )
     
+    training_time = time.time() - start_time
+    print(f"Training completed in {training_time/3600:.2f} hours")
+
+
     # Plot training metrics
     plt.figure(figsize=(10, 6))
     plt.plot(metrics['total_loss'], label='Total Loss')
@@ -226,7 +247,9 @@ def main():
         'num_features': num_features,
         'device': device,
         'batch_size': batch_size,
-        'num_epochs': num_epochs
+        'num_epochs': num_epochs,
+        'activation_type': activation_type,
+        'topk_features': topk_features
     }
     # Save params to a text file
     with open(f'{run_dir}/params.txt', 'w') as f:

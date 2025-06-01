@@ -19,32 +19,82 @@ from tqdm import tqdm
 from sklearn.decomposition import PCA
 from typing import List, Dict, Tuple, Optional, Union
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from typing import Any
 
 DEBUG = True
 
+def rectangle(x: torch.Tensor) -> torch.Tensor:
+    return ((x > -0.5) & (x < 0.5)).to(x)
+
+class jumprelu(torch.autograd.Function):
+    @staticmethod
+    def forward(x: torch.Tensor, threshold: torch.Tensor, bandwidth: float) -> torch.Tensor:
+        return (x * (x > threshold)).to(x)
+
+    @staticmethod
+    def setup_context(
+        ctx: Any, inputs: Tuple[torch.Tensor, torch.Tensor, float], output: torch.Tensor
+        ) -> None:
+        x, threshold, bandwidth = inputs
+        del output
+        ctx.save_for_backward(x, threshold)
+        ctx.bandwidth = bandwidth
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, None]:
+        x, threshold = ctx.saved_tensors
+        bandwidth = ctx.bandwidth
+        # Gradient is 1 where x > threshold, scaled by bandwidth
+        x_grad = (x >threshold) * grad_output
+        threshold_grad = torch.sum(
+            -(threshold / bandwidth) * rectangle((x - threshold) / bandwidth) * grad_output,
+            dim=0
+        )
+        return x_grad, threshold_grad, None
+
+class JumpReLU(torch.nn.Module):
+    def __init__(self, threshold: float, bandwidth: float) -> None:
+        super().__init__()
+        self.threshold = nn.Parameter(torch.tensor(threshold))
+        self.bandwidth = bandwidth
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return jumprelu.apply(x, self.threshold, self.bandwidth)
+    
+    def extra_repr(self) -> str:
+        return f"threshold={self.threshold}, bandwidth={self.bandwidth}"
+
+class TopK(nn.Module):
+    def __init__(self, k: int):
+        super().__init__()
+        self.k = k
+
+    def forward(self, x: torch.Tensor):
+        _, indices = torch.topk(x, k=self.k, dim=-1)
+        gate = torch.zeros_like(x)
+        gate.scatter_(dim=-1, index=indices, value=1)
+        return x * gate.to(x.dtype)
+    
 class OpenCrossLayerTranscoder(nn.Module):
-    """
-    Cross-Layer Transcoder for GPT-2 Small.
     
-    This class implements a cross-layer transcoder that can:
-    1. Extract activations from different layers of GPT-2
-    2. Train encoder/decoder pairs to map between neuron activations and interpretable features
-    3. Visualize feature activations across different layers
-    """
-    
-    def __init__(self, model_name: str = "gpt2", num_features: int = 100, device: str = "cpu"):
+    def __init__(self, model_name: str = "gpt2", num_features: int = 100, 
+                 device: str = "cpu", activation_type: str = "jumprelu", topk_features: int = None):
         """
         Initialize the cross-layer transcoder.
         
         Args:
-            model_name: Name of the GPT-2 model to use (default: "gpt2" for GPT-2 Small)
+            model_name: Name of the GPT-2 model to use
             num_features: Number of interpretable features to extract
             device: Device to run the model on ("cpu" or "cuda")
+            activation_type: Type of activation function to use in the transcoder
+                             (e.g., "jumprelu", "relu", "topk")
+            topk_features: If using "topk" activation, specify the number of top features to keep
         """
         super().__init__()
         self.device = device
         self.model_name = model_name
         self.num_features = num_features
+        self.activation_type = activation_type
         
         # Load the base GPT-2 model
         self.base_model = GPT2Model.from_pretrained(model_name).to(device)
@@ -60,8 +110,6 @@ class OpenCrossLayerTranscoder(nn.Module):
         self.hidden_size = self.config.n_embd
         
         # Create encoder and decoder networks for each layer
-        # The MLP activations have shape [batch_size, seq_len, hidden_size]
-        # We encode from hidden_size to num_features
         self.encoders = nn.ModuleList([
             nn.Linear(self.hidden_size, num_features) 
             for _ in range(self.num_layers)
@@ -72,6 +120,27 @@ class OpenCrossLayerTranscoder(nn.Module):
             for _ in range(self.num_layers)
         ]).to(device)
         
+        self._initialize_weights()
+
+        # Activation functions for each layer
+        if activation_type == "jumprelu":
+            self.activation_functions = nn.ModuleList([
+                JumpReLU(threshold=0.0, bandwidth=0.1) 
+                for _ in range(self.num_layers)
+            ]).to(device)
+        elif activation_type == "topk":
+            if topk_features is None:
+                topk_features = max(1, num_features // 20)  # Default to 5% of num_features
+            self.activation_functions = nn.ModuleList([
+                TopK(k=topk_features) 
+                for _ in range(self.num_layers)
+                ]).to(device)
+        else:
+            self.activation_functions = nn.ModuleList([
+                nn.ReLU()  # Default to ReLU if no specific activation is chosen
+                for _ in range(self.num_layers)
+            ]).to(device)
+
         # Initialize the hooks and activation storage
         self.hooks = []
         self.mlp_activations = {}
@@ -80,6 +149,17 @@ class OpenCrossLayerTranscoder(nn.Module):
         
         # Feature importance tracking
         self.feature_importance = torch.zeros(self.num_layers, num_features).to(device)
+
+    def _initialize_weights(self):
+        for layer_idx in range(self.num_layers):
+            # Initialize encoder weights
+            nn.init.xavier_uniform_(self.encoders[layer_idx].weight)
+            nn.init.zeros_(self.encoders[layer_idx].bias)
+            
+            # Initialize decoder as T encoder
+            with torch.no_grad():
+                self.decoders[layer_idx].weight.data = self.encoders[layer_idx].weight.data.T.clone()
+            nn.init.zeros_(self.decoders[layer_idx].bias)
         
     def print_activations(self, layer_idx, features_relu, num_features):
         if features_relu.numel() > 0: # Check if tensor is not empty
@@ -145,21 +225,22 @@ class OpenCrossLayerTranscoder(nn.Module):
         
         for layer_idx in range(self.num_layers):
             if layer_idx in self.mlp_inputs_captured:
-                encoder_input_data = self.mlp_inputs_captured[layer_idx]
-                features = self.encoders[layer_idx](encoder_input_data)
+                # MLP input
+                mlp_input = self.mlp_inputs_captured[layer_idx]
 
-                feature_activations[layer_idx] = features
-                
-                # Apply ReLU to features for interpretability
-                features_relu = F.relu(features)
-                
+                # Encode to features
+                features = self.encoders[layer_idx](mlp_input)
+
+                features_activated = self.activation_functions[layer_idx](features)
+                feature_activations[layer_idx] = features_activated
+
                 # Decode back to MLP space
-                reconstructed = self.decoders[layer_idx](features_relu)
+                reconstructed = self.decoders[layer_idx](features_activated)
                 reconstructed_activations[layer_idx] = reconstructed
                 
                 # Update feature importance based on activation magnitude
                 with torch.no_grad():
-                    importance = torch.mean(torch.abs(features), dim=(0, 1))
+                    importance = torch.mean(torch.abs(features_activated), dim=(0, 1))
                     self.feature_importance[layer_idx] += importance
         
         return {
@@ -173,7 +254,7 @@ class OpenCrossLayerTranscoder(nn.Module):
                          batch_size: int = 4, 
                          num_epochs: int = 5,
                          learning_rate: float = 1e-4,
-                         l1_sparsity_coefficient: float = 0.01,
+                         l1_sparsity_coefficient: float = 0.05,
                          lr_scheduler_factor: float = 0.1,
                          lr_scheduler_patience: int = 100,
                          ) -> Dict[str, List[float]]:
@@ -195,17 +276,19 @@ class OpenCrossLayerTranscoder(nn.Module):
         # Set model to training mode
         self.train()
         
+        all_params = (list(self.encoders.parameters()) 
+                      + list(self.decoders.parameters()) 
+                      + list(self.activation_functions.parameters()))
+
         # Create optimizer
         optimizer = torch.optim.Adam(
-            list(self.encoders.parameters()) + list(self.decoders.parameters()),
-            lr=learning_rate
+            all_params, lr=learning_rate
         )
 
         scheduler = ReduceLROnPlateau(optimizer,
                                       mode='min', # We want the loss to decrease
                                       factor=lr_scheduler_factor,
-                                      patience=lr_scheduler_patience,
-                                      verbose=True # Prints a message when LR is reduced
+                                      patience=lr_scheduler_patience
         )        
         # Training metrics
         metrics = {
@@ -267,50 +350,57 @@ class OpenCrossLayerTranscoder(nn.Module):
                 sparsity_loss = 0
                 
                 for layer_idx in range(self.num_layers):
-                    if layer_idx in self.mlp_activations and layer_idx in self.mlp_inputs_captured:
-                        # Get MLP inputs and outputs
-                        residual_stream_input_to_mlp = self.mlp_inputs_captured[layer_idx]
-                        mlp_actual_output = self.mlp_activations[layer_idx]
+                    if layer_idx in self.mlp_inputs_captured:
+                        mlp_input = self.mlp_inputs_captured[layer_idx]
 
-                        # Calculate MLP's contribution to residual stream
-                        mlp_contribution = mlp_actual_output - residual_stream_input_to_mlp
-                        
                         # Encode to features
-                        features = self.encoders[layer_idx](residual_stream_input_to_mlp)
+                        features = self.encoders[layer_idx](mlp_input)
                         
-                        # Apply ReLU for interpretability
-                        features_relu = F.relu(features)
+                        # Apply activation function
+                        features_activated = self.activation_functions[layer_idx](features)
                         
                         # Decode back to MLP space
-                        reconstructed_mlp_output = self.decoders[layer_idx](features_relu)
+                        reconstructed = self.decoders[layer_idx](features_activated)
                         
                         if DEBUG == True and batch_idx == 0 and epoch == 0: 
-                            self.print_activations(layer_idx, features_relu, self.num_features)
+                            self.print_activations(layer_idx, features_activated, self.num_features)
 
                         # L0 metric (sparsity)
-                        # l0_metric = torch.count_nonzero(features_relu, dim=2).float()
-                        l0_metric = torch.sum((features_relu > 0.1).float(), dim=2)
+                        l0_metric = torch.sum((features_activated > 1e-6).float(), dim=2)
 
                         # Reconstruction loss (MSE)
-                        recon_loss = F.mse_loss(reconstructed_mlp_output, mlp_contribution)
+                        recon_loss = F.mse_loss(reconstructed, mlp_input)
                         reconstruction_loss += recon_loss
                         
                         # Sparsity loss (L1 regularization on features)
-                        l1_loss = l1_sparsity_coefficient * torch.mean(torch.abs(features))
-                        sparsity_loss += l1_loss
-                        
+                        if self.activation_type != "topk":
+                            l1_loss = l1_sparsity_coefficient * torch.mean(features_activated)
+                            sparsity_loss += l1_loss
+                        else:
+                            l1_loss = 0
                         # Add to total loss
                         total_loss += recon_loss + l1_loss
                 
                 # Backward pass and optimization
                 total_loss.backward()
+
+                # Clip gradients to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
                 optimizer.step()
                 
+                with torch.no_grad():
+                    # Normalize feature importance
+                    for layer_idx in range(self.num_layers):
+                        decoder_norms = torch.norm(self.decoders[layer_idx].weight, dim=1, keepdim=True)
+                        self.decoders[layer_idx].weight.div_(decoder_norms + 1e-8)  # Avoid division by zero
+
                 # Update metrics
                 epoch_total_loss += total_loss.item()
                 epoch_recon_loss += reconstruction_loss.item()
-                epoch_sparsity_loss += sparsity_loss.item()
-
+                if isinstance(sparsity_loss, torch.Tensor):
+                    epoch_sparsity_loss += sparsity_loss.item()
+                else:
+                    epoch_sparsity_loss += sparsity_loss
                 epoch_l0_metric += torch.mean(l0_metric).item()
             
             # Record epoch metrics
@@ -340,7 +430,11 @@ class OpenCrossLayerTranscoder(nn.Module):
                   f"Recon = {avg_recon_loss:.4f}, "
                   f"Sparsity = {avg_sparsity_loss:.4f}, "
                   f"L0 Metric = {avg_l0_metric:.4f}")
-        
+
+            if self.activation_type == "jumprelu":
+                thresholds = [act.threshold.item() for act in self.activation_functions[:3]]
+                print(f"JumpReLU thresholds first 3 layers: {[f'{t:.3f}' for t in thresholds]}")
+            
         return metrics
     
     def get_feature_activations(self, text: str) -> Dict[int, torch.Tensor]:
@@ -633,10 +727,10 @@ class ReplacementModel(nn.Module):
 
                     # Encode using the transcoder's encoder, which is now trained to expect r_k
                     features = self.transcoder.encoders[layer_idx](current_mlp_input_rk)
-                    features_relu = F.relu(features)
+                    features_activated = self.transcoder.activation_functions[layer_idx](features)
 
                     # Decode back to MLP output space. The decoder was trained to produce MLP_k(r_k).
-                    reconstructed_mlp_equivalent_output = self.transcoder.decoders[layer_idx](features_relu)
+                    reconstructed_mlp_equivalent_output = self.transcoder.decoders[layer_idx](features_activated)
 
                     # Add the original MLP output with the transcoder's reconstructed output
                     return current_mlp_input_rk + reconstructed_mlp_equivalent_output
