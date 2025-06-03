@@ -8,9 +8,6 @@ https://transformer-circuits.pub/2025/attribution-graphs/methods.html
 The cross-layer transcoder replaces MLP neurons with more interpretable features,
 allowing us to visualize and analyze how features interact across different layers.
 """
-"TO DO:"
-"-  Improve normalization to match their layer-specific approach"
-"- Fix the sparsity loss to use the tanh formulation"
 
 import torch
 import torch.nn as nn
@@ -241,8 +238,8 @@ class OpenCrossLayerTranscoder(nn.Module):
                 mlp_input = self.mlp_inputs_captured[layer_idx] # this is what gets read
                 mlp_output = self.mlp_activations[layer_idx] # this is what gets written
 
-                mlp_input_normalized = F.layer_norm(mlp_input, [mlp_input.shape[-1]]) # Normalize input to MLP
-                mlp_output_normalized = F.layer_norm(mlp_output, [mlp_output.shape[-1]]) # Normalize output of MLP
+                mlp_input_normalized = F.layer_norm(mlp_input, mlp_input.shape[-1]) # Normalize input to MLP
+                mlp_output_normalized = F.layer_norm(mlp_output, mlp_output.shape[-1]) # Normalize output of MLP
                 # Encode to features
                 features = self.encoders[layer_idx](mlp_input_normalized) # linear encoder
                 features_activated = self.activation_functions[layer_idx](features) # non-linear activation
@@ -377,8 +374,8 @@ class OpenCrossLayerTranscoder(nn.Module):
                         mlp_output = self.mlp_activations[layer_idx]
 
                         # Normalize input to MLP
-                        mlp_input_normalized = F.layer_norm(mlp_input, [mlp_input.shape[1]])  # Normalize input to MLP
-                        mlp_output_normalized = F.layer_norm(mlp_output, [mlp_output.shape[1]])  # Normalize output of MLP
+                        mlp_input_normalized = F.layer_norm(mlp_input, mlp_input.shape[-1:])  # Normalize input to MLP
+                        mlp_output_normalized = F.layer_norm(mlp_output, mlp_output.shape[-1:])  # Normalize output of MLP
 
                         # Encode to features
                         features = self.encoders[layer_idx](mlp_input_normalized)
@@ -408,7 +405,16 @@ class OpenCrossLayerTranscoder(nn.Module):
                         
                         # Sparsity loss (L1 regularization on features)
                         if self.activation_type != "topk":
-                            l1_loss = l1_sparsity_coefficient * torch.mean(torch.abs(features_activated))
+                            decoder_norms = []
+                            for decoder_layer in range(layer_idx, self.num_layers):
+                                key = f"{layer_idx}_{decoder_layer}"
+                                decoder_norm = torch.norm(self.decoders[key].weight, dim=1)
+                                decoder_norms.append(decoder_norm)
+                            
+                            total_decoder_norm = torch.stack(decoder_norms, dim=0).sum(dim=0)
+                            c = 1.0
+                            feature_sparsity = torch.tanh(c * total_decoder_norm * features_activated.abs())
+                            l1_loss = l1_sparsity_coefficient * torch.mean(feature_sparsity)
                             sparsity_loss += l1_loss
                         else:
                             l1_loss = 0
@@ -422,11 +428,6 @@ class OpenCrossLayerTranscoder(nn.Module):
                 torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
                 optimizer.step()
                 
-                with torch.no_grad():
-                    # Normalize feature importance
-                    for key in self.decoders.keys():
-                        decoder_norms = torch.norm(self.decoders[key].weight, dim=1, keepdim=True)
-                        self.decoders[key].weight.div_(decoder_norms + 1e-8)  # Avoid division by zero
 
                 # Update metrics
                 epoch_total_loss += total_loss.item()
