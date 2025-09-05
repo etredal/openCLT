@@ -1,5 +1,7 @@
 # Open Cross-Layer Transcoder
 
+Note: This project is not fully functional yet.  With small~medium edits it should be, depending on your use case.
+
 This project implements a cross-layer transcoder originally based on the paper [Circuit Tracing: Revealing Computational Graphs in Language Models](https://transformer-circuits.pub/2025/attribution-graphs/methods.html).  This is an open source project free to use.  Cross Layer Transcoders (CLT) have become very useful for Mechanistic Interpretability research -- that is, the study of how an AI model works.  We are hoping in the long run that we can model the architecture of AI in a human-understandable way, and CLTs are a good first step.  This would have major implications in AI alignment, safety, and understanding, which would even allow humans to create more efficient and useful AI. 
 
 ## Overview
