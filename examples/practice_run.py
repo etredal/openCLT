@@ -4,45 +4,56 @@ Basic Example of Cross-Layer Transcoder with GPT-2 Small
 This script demonstrates how to use the cross-layer transcoder with GPT-2 Small
 to visualize features across different layers of the model.
 """
-
-import torch
-import matplotlib.pyplot as plt
-from open_cross_layer_transcoder import OpenCrossLayerTranscoder, ReplacementModel
+# === Std lib ===
 import os
 import uuid
-import numpy as np
-from tqdm import tqdm
-from datasets import Dataset
-from pyarrow import feather
-from datasets import load_dataset
 import gc
-import json
 import time
+from pathlib import Path
+
+# === Local Lib ===
+from openclt import OpenCrossLayerTranscoder, ReplacementModel
+from openclt.types import TrainingMetric
+
+# === Packages
+import torch
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+import matplotlib.pyplot as plt
+import numpy as np
+from datasets import load_dataset
+
+import argparse
 
 
-# Set device
-device = "cuda" if torch.cuda.is_available() else "cpu"
-#device="cpu"
-print(f"Using device: {device}")
+# Output directory
+OUT_DIR: Path = Path(__file__).resolve().parent / "out"
+OUT_DIR.mkdir(exist_ok=True)
 
-# Generate random guid
 run_uuid = uuid.uuid4()
+RUN_DIR: Path = OUT_DIR / f"run_{str(run_uuid)}" 
+DATASET_DIR: Path = Path(__file__).resolve().parent / "datasets"
 
-# Create output directory for visualizations
-run_dir = "run_" + str(run_uuid)
-os.makedirs(run_dir, exist_ok=True)
+os.makedirs(RUN_DIR, exist_ok=True)
 
-def main():
-    print("Starting: " + run_dir)
+def main(args):
+    print("Starting: " + str(RUN_DIR))
     print("Initializing Cross-Layer Transcoder with GPT-2 Small...")
     
+    # Configure device
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    print(f"Using Device: {device}")
+
     # Params
     model_name = "gpt2"  # GPT-2 Small
-    num_features = 16 * 768
-    batch_size = 64
-    num_epochs = 100
+    num_features = 10
+    batch_size = 1
+    num_epochs = 2
     activation_type = "topk"
-    topk_features = int(num_features * 0.02)  
+    topk_features = int(num_features * 0.02) 
+    
+    SAMPLES = f"{args.num_samples}" if args.num_samples else f'{args.percent_samples}%' if args.percent_samples else '5%'
+    print(f"Using {SAMPLES} of dataset")
 
     # Initialize the cross-layer transcoder
     transcoder = OpenCrossLayerTranscoder(
@@ -53,7 +64,8 @@ def main():
         topk_features=topk_features
     )
 
-    dataset = load_dataset("bookcorpus", split="train[:5%]", trust_remote_code=True)
+    dataset = load_dataset("rojagtap/bookcorpus", split=f"train[:{SAMPLES}]", keep_in_memory=True)
+    dataset.take(100)
     sentences = [entry["text"] for entry in dataset]
     train_texts = sentences[:800000]
     print(f"Loaded {len(train_texts)} training texts: {train_texts[:5]}")
@@ -68,7 +80,7 @@ def main():
     print("Training the Cross-Layer Transcoder...")
     
     # Train the transcoder
-    metrics = transcoder.train_transcoder(
+    metrics: TrainingMetric = transcoder.train_transcoder(
         texts=train_texts,
         batch_size=batch_size,
         num_epochs=num_epochs,
@@ -84,16 +96,16 @@ def main():
 
     # Plot training metrics
     plt.figure(figsize=(10, 6))
-    plt.plot(metrics['total_loss'], label='Total Loss')
-    plt.plot(metrics['reconstruction_loss'], label='Reconstruction Loss')
-    plt.plot(metrics['sparsity_loss'], label='Sparsity Loss')
+    plt.plot(metrics.total_loss, label='Total Loss')
+    plt.plot(metrics.reconstruction_loss, label='Reconstruction Loss')
+    plt.plot(metrics.sparsity_loss, label='Sparsity Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training Metrics')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig(f'{run_dir}/training_metrics.png')
-    print(f"Training metrics saved to {run_dir}/training_metrics.png")
+    plt.savefig(f'{RUN_DIR}/training_metrics.png')
+    print(f"Training metrics saved to {RUN_DIR}/training_metrics.png")
 
     # Test texts for visualization
     test_texts = [
@@ -108,10 +120,10 @@ def main():
         fig = transcoder.visualize_feature_activations(
             text=text,
             top_n=5,
-            save_path=f'{run_dir}/feature_activations_{i+1}.png'
+            save_path=RUN_DIR / f'feature_activations_{i+1}.png'
         )
         plt.close(fig)
-        print(f"Feature activations for text {i+1} saved to {run_dir}/feature_activations_{i+1}.png")
+        print(f"Feature activations for text {i+1} saved to {RUN_DIR}/feature_activations_{i+1}.png")
 
     # Create attribution graphs
     print("Creating attribution graphs...")
@@ -119,10 +131,10 @@ def main():
         fig = transcoder.create_attribution_graph(
             text=text,
             threshold=0.8,
-            save_path=f'{run_dir}/attribution_graph_{i+1}.png'
+            save_path=f'{RUN_DIR}/attribution_graph_{i+1}.png'
         )
         plt.close(fig)
-        print(f"Attribution graph for text {i+1} saved to {run_dir}/attribution_graph_{i+1}.png")
+        print(f"Attribution graph for text {i+1} saved to {RUN_DIR}/attribution_graph_{i+1}.png")
     
     # Create a replacement model
     print("Creating replacement model...")
@@ -135,7 +147,6 @@ def main():
     print("Comparing original model vs replacement model outputs...")
     
     # Initialize the original model
-    from transformers import GPT2LMHeadModel, GPT2Tokenizer
     original_model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
 
@@ -217,29 +228,29 @@ def main():
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(f'{run_dir}/model_comparison.png')
-    print(f"Model comparison results saved to {run_dir}/model_comparison.png")
+    plt.savefig(f'{RUN_DIR}/model_comparison.png')
+    print(f"Model comparison results saved to {RUN_DIR}/model_comparison.png")
 
     # Save the trained transcoder
-    transcoder.save_model(f'{run_dir}/cross_layer_transcoder_gpt2.pt')
-    print(f"Trained cross-layer transcoder saved to {run_dir}/cross_layer_transcoder_gpt2.pt")
+    transcoder.save_model(f'{RUN_DIR}/cross_layer_transcoder_gpt2.pt')
+    print(f"Trained cross-layer transcoder saved to {RUN_DIR}/cross_layer_transcoder_gpt2.pt")
 
     # Save the replacement model
-    replacement_model.save_model(f'{run_dir}/replacement_model_gpt2.pt')
-    print(f"Replacement model saved to {run_dir}/replacement_model_gpt2.pt")
+    replacement_model.save_model(f'{RUN_DIR}/replacement_model_gpt2.pt')
+    print(f"Replacement model saved to {RUN_DIR}/replacement_model_gpt2.pt")
 
     # Save the training metrics in json format
     print("Saving training metrics...")
     save_metrics = {
-        'total_loss': metrics['total_loss'],
-        'reconstruction_loss': metrics['reconstruction_loss'],
-        'sparsity_loss': metrics['sparsity_loss']
+        'total_loss': metrics.total_loss,
+        'reconstruction_loss': metrics.reconstruction_loss,
+        'sparsity_loss': metrics.sparsity_loss
     }
 
-    with open(f'{run_dir}/training_metrics.json', 'w') as f:
+    with open(f'{RUN_DIR}/training_metrics.json', 'w') as f:
         import json
         json.dump(save_metrics, f)
-    print(f"Training metrics saved to {run_dir}/training_metrics.json")
+    print(f"Training metrics saved to {RUN_DIR}/training_metrics.json")
 
     # Save params
     params = {
@@ -252,13 +263,36 @@ def main():
         'topk_features': topk_features
     }
     # Save params to a text file
-    with open(f'{run_dir}/params.txt', 'w') as f:
+    with open(f'{RUN_DIR}/params.txt', 'w') as f:
         for key, value in params.items():
             f.write(f"{key}: {value}\n")
-    print(f"Parameters saved to {run_dir}/params.txt")
+    print(f"Parameters saved to {RUN_DIR}/params.txt")
 
     print("\nExample completed successfully!")
-    print(f"All visualizations and data are saved in the '{run_dir}' directory.")
+    print(f"All visualizations and data are saved in the '{RUN_DIR}' directory.")
+
+
+def validate_percentile_input(value: int) -> int:
+    ivalue = int(value)
+    if ivalue <= 0 or ivalue > 100:
+        raise argparse.ArgumentTypeError(f"{value} is an invalid percentile")
+    return ivalue
+
+def validate_num_samples_input(value: int) -> int:
+    ivalue = int(value)
+    if ivalue < 100:
+        raise argparse.ArgumentError(f"Must take in at least 100 samples")
 
 if __name__ == "__main__":
-    main()
+
+    parser = argparse.ArgumentParser(
+        description="""
+        ===== openCLT =====\n
+        """)
+    parser.add_argument("--cpu", action='store_true', help="Enables usage on CPU. Omit if running on a GPU")
+    parser.add_argument("--num_samples", type=int, help="Fixed number of samples to use")
+    parser.add_argument("--percent_samples", type=validate_percentile_input, help="Percent of samples to use from the dataset. Must be > 0, <= 100")
+
+    args = parser.parse_args()
+
+    main(args)
