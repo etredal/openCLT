@@ -9,6 +9,10 @@ bin
 # Results 
 run_*
 run_*/
+# Leave example an example for review
+!run_example
 
 # Poetry build outputs
 dist/
+
+**/pyvenv.cfg
