@@ -16,3 +16,5 @@ run_*/
 dist/
 
 **/pyvenv.cfg
+
+**/poetry.lock
