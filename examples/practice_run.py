@@ -46,9 +46,9 @@ def main(args):
 
     # Params
     model_name = "gpt2"  # GPT-2 Small
-    num_features = 10
-    batch_size = 1
-    num_epochs = 2
+    num_features = 12 * 768
+    batch_size = 12
+    num_epochs = 1
     activation_type = "topk"
     topk_features = int(num_features * 0.02) 
     
