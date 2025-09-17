@@ -9,17 +9,28 @@ The cross-layer transcoder replaces MLP neurons with more interpretable features
 allowing us to visualize and analyze how features interact across different layers.
 """
 
+# === Std Lib ===
+from pathlib import Path
+
+# === Local Lib ===
+from openclt.types.metrics import TrainingMetric
+
+# === Packages === 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 from transformers import GPT2Model, GPT2LMHeadModel, GPT2Tokenizer
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 from sklearn.decomposition import PCA
-from typing import List, Dict, Tuple, Optional, Union
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from typing import Any
+
+from tqdm import tqdm
+from typing import List, Dict, Tuple, Optional, Any
+
 
 DEBUG = True
 
@@ -69,7 +80,7 @@ class TopK(nn.Module):
         super().__init__()
         self.k = k
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, indices = torch.topk(x, k=self.k, dim=-1)
         gate = torch.zeros_like(x)
         gate.scatter_(dim=-1, index=indices, value=1)
@@ -91,15 +102,15 @@ class OpenCrossLayerTranscoder(nn.Module):
             topk_features: If using "topk" activation, specify the number of top features to keep
         """
         super().__init__()
-        self.device = device
+        self.device = torch.device(device=device)
         self.model_name = model_name
         self.num_features = num_features
         self.activation_type = activation_type
         
         # Load the base GPT-2 model
         self.base_model = GPT2Model.from_pretrained(model_name).to(device)
-        self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-
+        self.tokenizer: GPT2Tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
@@ -238,8 +249,8 @@ class OpenCrossLayerTranscoder(nn.Module):
                 mlp_input = self.mlp_inputs_captured[layer_idx] # this is what gets read
                 mlp_output = self.mlp_activations[layer_idx] # this is what gets written
 
-                mlp_input_normalized = F.layer_norm(mlp_input, mlp_input.shape[-1]) # Normalize input to MLP
-                mlp_output_normalized = F.layer_norm(mlp_output, mlp_output.shape[-1]) # Normalize output of MLP
+                mlp_input_normalized = F.layer_norm(mlp_input, (mlp_input.shape[-1],)) # Normalize input to MLP
+                mlp_output_normalized = F.layer_norm(mlp_output, (mlp_output.shape[-1],)) # Normalize output of MLP
                 # Encode to features
                 features = self.encoders[layer_idx](mlp_input_normalized) # linear encoder
                 features_activated = self.activation_functions[layer_idx](features) # non-linear activation
@@ -273,7 +284,7 @@ class OpenCrossLayerTranscoder(nn.Module):
                          l1_sparsity_coefficient: float = 0.05,
                          lr_scheduler_factor: float = 0.1,
                          lr_scheduler_patience: int = 100,
-                         ) -> Dict[str, List[float]]:
+                         ) -> TrainingMetric:
         """
         Train the cross-layer transcoder on a corpus of texts.
         
@@ -307,13 +318,7 @@ class OpenCrossLayerTranscoder(nn.Module):
                                       patience=lr_scheduler_patience
         )        
         # Training metrics
-        metrics = {
-            'total_loss': [],
-            'reconstruction_loss': [],
-            'sparsity_loss': [],
-            'l0_metric': [],
-            'learning_rate': []
-        }
+        metrics = TrainingMetric()
         
         # Tokenize all texts
         encoded_texts = [self.tokenizer.encode(text, return_tensors="pt").to(self.device) for text in texts]
@@ -444,12 +449,11 @@ class OpenCrossLayerTranscoder(nn.Module):
             avg_sparsity_loss = epoch_sparsity_loss / num_batches
             avg_l0_metric = epoch_l0_metric / num_batches
             
-            metrics['total_loss'].append(avg_total_loss)
-            metrics['reconstruction_loss'].append(avg_recon_loss)
-            metrics['sparsity_loss'].append(avg_sparsity_loss)
-            metrics['l0_metric'].append(avg_l0_metric)
-            metrics['learning_rate'].append(optimizer.param_groups[0]['lr'])
-        
+            metrics.total_loss.append(avg_total_loss)
+            metrics.reconstruction_loss.append(avg_recon_loss)
+            metrics.sparsity_loss.append(avg_sparsity_loss)
+            metrics.l0_metric.append(avg_l0_metric)
+            metrics.learning_rate.append(optimizer.param_groups[0]['lr'])
 
             # Step the scheduler
             scheduler.step(avg_total_loss) # Step with the monitored metric
@@ -480,12 +484,13 @@ class OpenCrossLayerTranscoder(nn.Module):
         self.eval()
         
         # Tokenize input
-        input_ids = self.tokenizer.encode(text, return_tensors="pt").to(self.device)
-        
+        input_ids: torch.Tensor = self.tokenizer.encode(text, return_tensors="pt").to(self.device)
+
         # Forward pass
         with torch.no_grad():
-            outputs = self(input_ids)
-        
+            outputs = self.forward(input_ids)
+        print([k, v] for k, v in outputs.items())
+
         return outputs['feature_activations']
     
     def get_top_features(self, n: int = 10) -> Dict[int, List[int]]:
@@ -513,7 +518,7 @@ class OpenCrossLayerTranscoder(nn.Module):
     def visualize_feature_activations(self, 
                                      text: str, 
                                      top_n: int = 5,
-                                     save_path: Optional[str] = None) -> plt.Figure:
+                                     save_path: Optional[Path] = None) -> plt.Figure:
         """
         Visualize feature activations across layers for a given text.
         

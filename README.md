@@ -19,10 +19,34 @@ The cross-layer transcoder replaces MLP neurons with more interpretable features
 # Clone the repository
 git clone https://github.com/yourusername/cross-layer-transcoder.git
 cd cross-layer-transcoder
-
-# Install dependencies
-pip install torch transformers matplotlib numpy scikit-learn tqdm seaborn
 ```
+
+This project uses Poetry for **dependency management** and **packaging**.
+You can install poetry [here](https://python-poetry.org/docs/).
+
+```bash
+# Install dependencies
+$ poetry install
+Creating virtualenv openclt-E4zm1Hic-py3.12 in /home/user/.cache/pypoetry/virtualenvs
+...
+```
+This will generate a **venv** folder where all the dependencies are stored.
+You can find and activate the virtual enviornment with:
+```bash
+poetry env activate
+> /some/path/pypoetry/virtualenvs/openclt-{uid}
+# Linux / MacOS
+source `~/.cache/pypoetry/virtualenvs/openclt-{uid}/bin/activate`
+# Windows
+./some/path/pypoetry/virtualenvs/openclt-{uid}/bin/activate
+```
+
+***Now you're set!***
+
+Explore and play around with CrossLayerTranscoders, explore and add new features, share your discoveries!
+
+#### VSCode users:
+You will have to activate the virtual enviornment in your IDE. Follow [this](https://code.visualstudio.com/docs/python/environments) tutorial for more info.
 
 ## Usage
 
